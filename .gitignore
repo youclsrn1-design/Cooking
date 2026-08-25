@@ -1,1 +1,10 @@
+# Streamlit 보안 파일 (API 키, 비밀번호 등)
+.streamlit/secrets.toml
+
+# 파이썬 컴파일 및 캐시 파일
+__pycache__/
+*.pyc
+
+# 파이썬 가상환경 폴더
+.venv/
 
