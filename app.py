@@ -1,28 +1,70 @@
 """
-오늘 뭐 해먹지 — 냉장고 재료 레시피
-Streamlit Cloud 배포용 (React 아티팩트 디자인 이식 버전)
+오늘 뭐 해먹지 — 냉장고 재료 레시피 (오프라인 버전)
+
+API 키가 필요 없습니다. recipes.json 안의 요리 데이터에서
+가진 재료와 가장 잘 맞는 요리를 골라 보여 줍니다.
 
 실행: streamlit run app.py
-필요: Streamlit Cloud → Settings → Secrets 에
-      ANTHROPIC_API_KEY = "sk-ant-..."
 """
 
-import base64
 import html as html_lib
 import json
 import random
 import re
+from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
-from anthropic import Anthropic
-
-MODEL = "claude-sonnet-5"
 
 st.set_page_config(page_title="오늘 뭐 해먹지", page_icon="🍳", layout="centered")
 
 INK, TILE, LINE, PAPER = "#16241F", "#DCE7E2", "#B4C7BF", "#FBF7EF"
 TOMATO, BUTTER, HERB = "#D4402C", "#F0BA3F", "#4E7A5E"
+
+# 집에 늘 있다고 보는 기본 조미료
+PANTRY = {"소금", "후추", "설탕", "간장", "식용유", "올리브유", "참기름",
+          "마늘", "고춧가루", "식초", "물"}
+
+# 다르게 부르는 재료 이름을 하나로 모아 준다
+SYNONYM = {
+    "달걀": "계란", "계란후라이": "계란",
+    "파": "대파", "쪽파": "대파", "실파": "대파",
+    "돼지": "돼지고기", "삼겹살": "돼지고기", "목살": "돼지고기", "앞다리살": "돼지고기",
+    "쇠고기": "소고기", "우삼겹": "소고기", "차돌박이": "소고기",
+    "닭": "닭고기", "닭가슴살": "닭고기", "닭다리살": "닭고기", "닭안심": "닭고기",
+    "다진 고기": "다진고기", "간고기": "다진고기",
+    "파스타": "스파게티", "파스타면": "스파게티", "스파게티면": "스파게티",
+    "라면": "면", "중화면": "면", "라멘": "면",
+    "국수": "소면", "소면국수": "소면",
+    "모짜렐라": "치즈", "모차렐라": "치즈", "슬라이스치즈": "치즈",
+    "체다치즈": "치즈", "파마산": "치즈", "파르메산": "치즈",
+    "방울토마토": "토마토", "토마토소스": "토마토", "홀토마토": "토마토",
+    "느타리버섯": "버섯", "새송이버섯": "버섯", "표고버섯": "버섯",
+    "팽이버섯": "버섯", "양송이": "버섯", "느타리": "버섯", "새송이": "버섯",
+    "쌀밥": "밥", "찬밥": "밥", "즉석밥": "밥",
+    "김가루": "김", "조미김": "김",
+    "냉동새우": "새우", "칵테일새우": "새우",
+    "무우": "무", "적양파": "양파",
+    "호박": "애호박", "단호박": "애호박",
+    "카레": "카레가루", "카레분말": "카레가루",
+    "생크림": "생크림", "휘핑크림": "생크림",
+    "떡볶이떡": "떡", "가래떡": "떡",
+    "부침가루": "밀가루", "튀김가루": "밀가루",
+    "로메인": "상추", "양상추": "상추",
+    "토르티야": "또띠아", "뚜르띠아": "또띠아",
+    "우동": "우동면",
+}
+
+CATEGORIES = {
+    "채소": ["양파", "감자", "당근", "애호박", "양배추", "대파", "토마토", "오이",
+           "가지", "버섯", "상추", "콩나물", "숙주", "피망", "시금치", "무"],
+    "단백질": ["계란", "두부", "돼지고기", "소고기", "닭고기", "다진고기", "새우",
+            "참치캔", "베이컨", "햄", "어묵", "렌틸콩"],
+    "밥·면·빵": ["밥", "쌀", "소면", "스파게티", "쌀국수", "우동면", "면", "떡",
+              "식빵", "또띠아", "바게트", "밀가루"],
+    "양념·기타": ["김치", "치즈", "우유", "버터", "마요네즈", "김", "된장", "고추장",
+              "카레가루", "미역", "레몬", "바질", "고수", "생강", "청양고추"],
+}
 
 
 # ────────────────────────────── 스타일 ──────────────────────────────
@@ -64,7 +106,7 @@ html, body, [class*="css"] {{ font-family:'IBM Plex Sans KR',system-ui,sans-seri
 
 [class*="st-key-qk"] .stButton > button {{
   border:1px solid {LINE}; background:transparent; color:#3D544B;
-  border-radius:20px; font-weight:400; font-size:13px; padding:6px 10px; box-shadow:none; }}
+  border-radius:20px; font-weight:400; font-size:13px; padding:6px 8px; box-shadow:none; }}
 [class*="st-key-qk"] .stButton > button:hover {{ border-color:{HERB}; color:{HERB}; background:transparent; }}
 
 [class*="st-key-go"] .stButton > button {{
@@ -76,40 +118,52 @@ html, body, [class*="css"] {{ font-family:'IBM Plex Sans KR',system-ui,sans-seri
 [class*="st-key-go"] .stButton > button:disabled {{ opacity:.42; box-shadow:0 4px 0 {LINE}; }}
 
 [data-testid="stRadio"] label {{ font-size:14px; color:#3D544B; }}
-[data-testid="stFileUploader"] section {{ background:{PAPER}; border:1.5px dashed {LINE}; border-radius:4px; }}
+[data-testid="stExpander"] {{ border:1.5px solid {LINE}; border-radius:4px; background:{PAPER}; }}
+[data-testid="stExpander"] summary {{ font-size:14px; font-weight:600; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ────────────────────────────── Claude 호출 ──────────────────────────────
-@st.cache_resource
-def get_client():
-    key = st.secrets.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        st.error('API 키가 없습니다. Streamlit Cloud → Settings → Secrets 에 '
-                 'ANTHROPIC_API_KEY = "sk-ant-..." 를 넣어 주세요.')
-        st.stop()
-    return Anthropic(api_key=key)
+# ────────────────────────────── 데이터 ──────────────────────────────
+@st.cache_data
+def load_recipes():
+    path = Path(__file__).parent / "recipes.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def ask(content, max_tokens=4000):
-    msg = get_client().messages.create(
-        model=MODEL, max_tokens=max_tokens,
-        messages=[{"role": "user", "content": content}],
-    )
-    return "".join(b.text for b in msg.content if b.type == "text")
+RECIPES = load_recipes()
 
 
-def parse_json(text):
-    t = re.sub(r"```(?:json)?", "", text).strip()
-    for a, b in (("[", "]"), ("{", "}")):
-        s, e = t.find(a), t.rfind(b)
-        if s != -1 and e != -1:
-            try:
-                return json.loads(t[s:e + 1])
-            except json.JSONDecodeError:
-                continue
-    raise ValueError("JSON 파싱 실패")
+def canon(word):
+    w = re.sub(r"\s+", "", str(word)).strip()
+    return SYNONYM.get(w, w)
+
+
+def match_recipes(user_items, style):
+    """가진 재료와 요리를 맞춰 점수순으로 돌려준다"""
+    have = {canon(i) for i in user_items} | PANTRY
+    scored = []
+    for r in RECIPES:
+        if style == "한식" and r["cuisine"] != "한국":
+            continue
+        if style == "세계요리" and r["cuisine"] == "한국":
+            continue
+
+        core = [canon(c) for c in r["core"]]
+        opt = [canon(o) for o in r.get("optional", [])]
+        core_hit = [c for c in core if c in have]
+        missing = [c for c in core if c not in have]
+        opt_hit = [o for o in opt if o in have]
+
+        if not core_hit:
+            continue
+
+        score = (len(core_hit) / len(core)) * 100 + len(opt_hit) * 9 - len(missing) * 34
+        shown_have = [c for c in core_hit if c not in PANTRY] + opt_hit
+        scored.append((score, r, shown_have, missing))
+
+    scored.sort(key=lambda x: -x[0])
+    return scored
 
 
 # ────────────────────────────── 요리 그림(SVG) ──────────────────────────────
@@ -126,7 +180,6 @@ def shade(hex_color, amt):
 
 
 def dish_svg(name, form, palette):
-    """요리 이름을 시드로 써서 매번 같은 그림이 나오는 SVG 일러스트"""
     ok = (isinstance(palette, list) and len(palette) >= 3
           and str(palette[0]).startswith("#"))
     main, sauce, garnish = palette[:3] if ok else ("#C8552F", "#E9B44C", "#5B7F5B")
@@ -192,7 +245,7 @@ def dish_svg(name, form, palette):
             p.append(f'<path d="M{x-14},{y:.1f} q14,-20 28,0 q-14,9 -28,0 z" fill="{main}" '
                      f'transform="rotate({rnd.uniform(-12,12):.1f} {x} {y:.1f})"/>')
         p.append(f'<ellipse cx="140" cy="{cy-3}" rx="10" ry="6" fill="{garnish}"/>')
-    else:  # stirfry / 기본
+    else:
         for i in range(12):
             x, y = 100 + rnd.uniform(-46, 46), cy - 10 + rnd.uniform(-10, 10)
             c = (garnish, sauce, main, main)[i % 4]
@@ -264,29 +317,28 @@ def esc(s):
     return html_lib.escape(str(s if s is not None else ""))
 
 
-def card_html(r):
-    steps = "".join(f"<li>{esc(s)}</li>" for s in r.get("steps", []))
-    have = "".join(f'<span class="fr-have">{esc(h)}</span>' for h in r.get("have", []))
-    need_list = r.get("need") or []
-    need = "".join(f'<span class="fr-need">{esc(n)}</span>' for n in need_list)
-    need_row = f'<div><b>사야 할 것</b>{need}</div>' if need_list else ""
+def card_html(r, have, missing):
+    steps = "".join(f"<li>{esc(s)}</li>" for s in r["steps"])
+    have_html = "".join(f'<span class="fr-have">{esc(h)}</span>' for h in have)
+    need_html = "".join(f'<span class="fr-need">{esc(n)}</span>' for n in missing)
+    need_row = f'<div><b>사야 할 것</b>{need_html}</div>' if missing else ""
     tip = f'<div class="fr-tip"><b>맛내기</b>{esc(r.get("tip"))}</div>' if r.get("tip") else ""
     return f"""
 <article class="fr-card">
   <div class="fr-artbox">
-    <span class="fr-flag">{esc(r.get('cuisine', '요리'))}</span>
-    {dish_svg(r.get('name', '요리'), r.get('form'), r.get('palette'))}
+    <span class="fr-flag">{esc(r['cuisine'])}</span>
+    {dish_svg(r['name'], r['form'], r['palette'])}
   </div>
   <div class="fr-body">
-    <h3 class="fr-name">{esc(r.get('name', '요리'))}</h3>
+    <h3 class="fr-name">{esc(r['name'])}</h3>
     <p class="fr-summary">{esc(r.get('summary'))}</p>
     <div class="fr-meta">
-      <span>{esc(r.get('minutes', '—'))}분</span>
-      <span>{esc(r.get('difficulty', '보통'))}</span>
-      <span>{esc(r.get('servings', ''))}인분</span>
+      <span>{esc(r['minutes'])}분</span>
+      <span>{esc(r['difficulty'])}</span>
+      <span>{esc(r['servings'])}인분</span>
     </div>
     <div class="fr-tags">
-      <div><b>있는 재료</b>{have}</div>
+      <div><b>있는 재료</b>{have_html}</div>
       {need_row}
     </div>
     <ol class="fr-steps">{steps}</ol>
@@ -295,39 +347,19 @@ def card_html(r):
 </article>"""
 
 
-def card_height(r):
-    h = 200 + 46 + 46 + 56 + 46 + 54 * len(r.get("steps", [])) + 36
-    if r.get("need"):
+def card_height(r, missing):
+    h = 200 + 46 + 46 + 56 + 46 + 54 * len(r["steps"]) + 36
+    if missing:
         h += 32
     if r.get("tip"):
         h += 100
     return h
 
 
-# ────────────────────────────── 프롬프트 ──────────────────────────────
-RECIPE_PROMPT = """너는 요리 레시피 큐레이터다.
-사용자가 지금 가진 재료: {ings}
-요청한 요리 방향: {style}
-
-이 재료로 실제로 만들 수 있는 요리 3가지를 추천해라.
-
-규칙:
-- 기본 조미료(소금, 후추, 설탕, 간장, 식용유, 참기름, 다진마늘, 고춧가루, 식초, 물)는 집에 있다고 가정한다. need에 넣지 마라.
-- 3개 중 최소 2개는 가진 재료만으로 완성 가능해야 한다. 나머지 1개는 재료를 1~2개만 더 사면 되는 요리로 한다.
-- "{style}"가 '세계요리'면 서로 다른 나라 요리로, '한식'이면 모두 한국 요리로, '아무거나'면 한식 1개 + 다른 나라 요리 2개로 구성한다.
-- steps는 5~7단계. 한 단계는 한 문장. 불 세기와 시간을 반드시 넣어라.
-- palette는 완성된 요리를 사진으로 찍었을 때의 실제 색 3개를 hex로: [주재료색, 국물이나 소스색, 고명색].
-- form은 반드시 이 중 하나: soup, stew, noodle, stirfry, rice, grill, salad, pancake, bread, dumpling
-
-JSON 배열만 출력한다. 코드펜스와 설명은 금지.
-[{{"name":"김치볶음밥","cuisine":"한국","summary":"한 줄 설명","minutes":15,"difficulty":"쉬움","servings":2,"form":"rice","palette":["#C8402C","#E8B44C","#4E7A5E"],"have":["김치","밥"],"need":[],"steps":["..."],"tip":"..."}}]"""
-
-SUGGESTED = ["계란", "양파", "김치", "두부", "감자", "대파", "밥", "참치캔", "애호박", "당근", "우유", "닭가슴살"]
-
-
 # ────────────────────────────── 화면 ──────────────────────────────
 st.session_state.setdefault("items", [])
-st.session_state.setdefault("recipes", [])
+st.session_state.setdefault("results", None)
+st.session_state.setdefault("page", 0)
 
 
 def add_items(raw):
@@ -340,8 +372,8 @@ def add_items(raw):
 st.markdown(
     '<p class="fr-eyebrow">냉장고 파먹기</p>'
     '<h1 class="fr-title">오늘<br>뭐 <em>해먹지</em></h1>'
-    '<p class="fr-sub">지금 집에 있는 재료만 적어 주세요. 그 재료로 만들 수 있는 '
-    '한식과 세계 요리 세 가지를 그림과 조리 순서로 보여 드립니다.</p>',
+    f'<p class="fr-sub">지금 집에 있는 재료만 골라 주세요. 한국·일본·중국·이탈리아 등 '
+    f'{len(RECIPES)}가지 요리 중에서 지금 만들 수 있는 것을 찾아 드립니다.</p>',
     unsafe_allow_html=True)
 
 st.markdown(f'<p class="fr-label">내가 가진 재료 · {len(st.session_state["items"])}개</p>',
@@ -353,43 +385,33 @@ if st.session_state["items"]:
         with cols[i % 3]:
             if st.button(f"{it}  ✕", key=f"mag{i}"):
                 st.session_state["items"].remove(it)
+                st.session_state["results"] = None
                 st.rerun()
 else:
-    st.markdown('<p class="fr-empty">아직 비어 있어요. 아래에 적거나 사진을 올려 주세요.</p>',
+    st.markdown('<p class="fr-empty">아직 비어 있어요. 아래에서 골라 주세요.</p>',
                 unsafe_allow_html=True)
 
 c1, c2 = st.columns([3, 1])
 typed = c1.text_input("재료", placeholder="예: 두부, 대파, 계란", label_visibility="collapsed")
 if c2.button("담기", key="addbtn") and typed:
     add_items(typed)
+    st.session_state["results"] = None
     st.rerun()
 
-photo = st.file_uploader("냉장고 사진에서 재료 읽기", type=["jpg", "jpeg", "png", "webp"])
-if photo is not None and st.button("사진에서 재료 찾기", key="photobtn"):
-    with st.spinner("사진 읽는 중…"):
-        try:
-            b64 = base64.b64encode(photo.getvalue()).decode()
-            media = "image/png" if photo.type == "image/png" else "image/jpeg"
-            out = ask([
-                {"type": "image",
-                 "source": {"type": "base64", "media_type": media, "data": b64}},
-                {"type": "text",
-                 "text": "이 사진에 보이는 식재료 이름만 한국어로 뽑아라. 조미료·그릇·포장지 제외. "
-                         'JSON 배열만 출력. 예: ["양파","계란"]'},
-            ], max_tokens=500)
-            add_items(",".join(parse_json(out)))
-            st.rerun()
-        except Exception:
-            st.warning("사진에서 재료를 못 읽었어요. 직접 적어 주세요.")
-
-rest = [s for s in SUGGESTED if s not in st.session_state["items"]]
-if rest:
-    st.markdown('<p class="fr-label">자주 쓰는 재료</p>', unsafe_allow_html=True)
-    cols = st.columns(4)
-    for i, s in enumerate(rest):
-        if cols[i % 4].button(f"+ {s}", key=f"qk{i}"):
-            st.session_state["items"].append(s)
-            st.rerun()
+st.markdown('<p class="fr-label">재료 고르기</p>', unsafe_allow_html=True)
+n = 0
+for cat, names in CATEGORIES.items():
+    rest = [x for x in names if x not in st.session_state["items"]]
+    if not rest:
+        continue
+    with st.expander(cat, expanded=(cat == "채소")):
+        cols = st.columns(3)
+        for x in rest:
+            n += 1
+            if cols[n % 3].button(f"+ {x}", key=f"qk{n}"):
+                st.session_state["items"].append(x)
+                st.session_state["results"] = None
+                st.rerun()
 
 st.markdown('<p class="fr-label">요리 방향</p>', unsafe_allow_html=True)
 style = st.radio("요리 방향", ["아무거나", "한식", "세계요리"], horizontal=True,
@@ -403,18 +425,27 @@ st.markdown('<p class="fr-note">소금·간장·설탕·기름·마늘 같은 �
             unsafe_allow_html=True)
 
 if run:
-    with st.spinner("냉장고 뒤지는 중…"):
-        try:
-            out = ask(RECIPE_PROMPT.format(
-                ings=", ".join(st.session_state["items"]), style=style))
-            st.session_state["recipes"] = parse_json(out)[:3]
-        except Exception:
-            st.session_state["recipes"] = []
-            st.error("레시피를 불러오지 못했어요. 다시 시도해 주세요.")
+    st.session_state["results"] = match_recipes(st.session_state["items"], style)
+    st.session_state["page"] = 0
 
-if st.session_state["recipes"]:
-    rs = st.session_state["recipes"]
-    st.markdown(f'<p class="fr-label">만들 수 있는 요리 {len(rs)}</p>', unsafe_allow_html=True)
-    components.html(CARD_CSS + "".join(card_html(r) for r in rs),
-                    height=sum(card_height(r) for r in rs) + 30, scrolling=False)
+results = st.session_state["results"]
+if results is not None:
+    if not results:
+        st.warning("이 재료로 만들 수 있는 요리를 못 찾았어요. 재료를 몇 개 더 담아 보세요.")
+    else:
+        page = st.session_state["page"]
+        batch = results[page * 3:page * 3 + 3]
+        if not batch:
+            st.session_state["page"] = 0
+            batch = results[:3]
 
+        st.markdown(f'<p class="fr-label">만들 수 있는 요리 {len(batch)}</p>',
+                    unsafe_allow_html=True)
+        body = "".join(card_html(r, have, miss) for _, r, have, miss in batch)
+        total = sum(card_height(r, miss) for _, r, _, miss in batch) + 30
+        components.html(CARD_CSS + body, height=total, scrolling=False)
+
+        if len(results) > (page + 1) * 3:
+            if st.button("다른 요리 더 보기", key="more"):
+                st.session_state["page"] += 1
+                st.rerun()
